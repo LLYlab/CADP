@@ -592,7 +592,7 @@ def _tcp_rows_windows() -> list:
 
 def _tcp_rows_linux() -> list:
     rows = []
-    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+    for path in ("/proc/net/tcp",):
         try:
             lines = Path(path).read_text().splitlines()[1:]
         except OSError:
@@ -605,7 +605,10 @@ def _tcp_rows_linux() -> list:
             try:
                 lip, lport = local.split(":")
                 rip, rport = remote.split(":")
-                rows.append((int(state, 16), int(lport, 16), int(rport, 16), rip))
+                if len(rip) != 8:
+                    continue  # IPv4 only for this lightweight monitor
+                ip = socket.inet_ntoa(struct.pack("<L", int(rip, 16)))
+                rows.append((int(state, 16), int(lport, 16), ip))
             except ValueError:
                 continue
     return rows
@@ -633,14 +636,13 @@ def syn_monitor():
                         est[socket.inet_ntoa(struct.pack("<L", row.dwRemoteAddr))] += 1
             else:
                 syn, est = Counter(), Counter()
-                for state, lport, rport, rip in _tcp_rows_linux():
+                for state, lport, ip in _tcp_rows_linux():
                     if lport != port:
                         continue
-                    # Linux /proc remote is hex little-endian; present only for diagnostics
                     if state == 0x03:
-                        syn[f"remote-{rport}"] += 1
+                        syn[ip] += 1
                     elif state == 0x01:
-                        est[f"remote-{rport}"] += 1
+                        est[ip] += 1
             for ip, n in syn.items():
                 if n >= syn_limit and not STATE.is_banned(ip):
                     STATE.ban(ip, f"syn-flood/{n}", block_fw=bool(cfg.get("block_firewall", True)))

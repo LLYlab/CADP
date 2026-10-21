@@ -14,7 +14,7 @@ $ErrorActionPreference = "Stop"
 
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw "请以管理员身份运行 PowerShell。"
+    throw "Run PowerShell as Administrator."
 }
 
 $zip = Join-Path $env:TEMP "cadp-main.zip"
@@ -34,7 +34,7 @@ if (-not (Test-Path (Join-Path $Dest "site"))) {
 
 $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
 if (-not $python) {
-    throw "未找到 python.exe。请安装 Python 3.10+ 并勾选 Add to PATH，或把 Python 目录加入 PATH。"
+    throw "python.exe not found. Install Python 3.10+ and add it to PATH."
 }
 $pyDir = Split-Path $python
 $pythonw = Join-Path $pyDir "pythonw.exe"
@@ -43,7 +43,7 @@ if (-not (Test-Path $pythonw)) { $pythonw = $python }
 $config = Join-Path $Dest "config.json"
 Write-Host "[CADP] initializing config ..."
 & $python (Join-Path $Dest "cadp.py") --init-config --config $config --port $Port --root "site"
-if ($LASTEXITCODE -ne 0) { throw "初始化配置失败。" }
+if ($LASTEXITCODE -ne 0) { throw "CADP config init failed." }
 
 $taskName = "CADP"
 if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
@@ -68,7 +68,7 @@ if (-not (Get-NetFirewallRule -DisplayName "CADP-allow-$Port" -ErrorAction Silen
 
 Start-Sleep -Seconds 2
 $pwdFile = Join-Path $Dest "ADMIN_PASSWORD.txt"
-$password = if (Test-Path $pwdFile) { (Get-Content $pwdFile -Raw).Trim() } else { "(见 $pwdFile)" }
+$password = if (Test-Path $pwdFile) { (Get-Content $pwdFile -Raw).Trim() } else { "(see $pwdFile)" }
 Write-Host ""
 Write-Host "=============================================="
 Write-Host " CADP installed"
@@ -78,4 +78,4 @@ Write-Host "  Password: $password"
 Write-Host "  Folder  : $Dest"
 Write-Host "  Task    : $taskName (auto-start)"
 Write-Host "=============================================="
-Write-Host "提示：把静态文件放进 $Dest\site\；修改参数请打开 Admin 或 config.json。"
+Write-Host "Put static files into $Dest\site\ ; tune via /__cadp/admin or config.json."
