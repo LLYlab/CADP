@@ -157,26 +157,14 @@ class MonetizationTest(unittest.TestCase):
         cls.httpd.server_close()
         cls.td.cleanup()
 
-    def test_notice_consent_and_work(self):
+    def test_auto_notice_and_work(self):
         base = "http://127.0.0.1:18082"
         jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 
         page = opener.open(base + "/", timeout=10).read().decode()
-        self.assertIn("同意并继续", page)
         self.assertIn("如您不同意，请关闭页面", page)
-
-        req = urllib.request.Request(base + "/__cadp/api/start",
-                                     data=json.dumps({"next": "/"}).encode(),
-                                     headers={"Content-Type": "application/json"})
-        with self.assertRaises(urllib.error.HTTPError) as ctx:
-            opener.open(req, timeout=10)
-        self.assertEqual(ctx.exception.code, 403)
-
-        req = urllib.request.Request(base + "/__cadp/api/consent",
-                                     data=json.dumps({"agree": True}).encode(),
-                                     headers={"Content-Type": "application/json"})
-        self.assertTrue(json.loads(opener.open(req, timeout=10).read())["ok"])
+        self.assertIn("CADP", page)
 
         req = urllib.request.Request(base + "/__cadp/api/start",
                                      data=json.dumps({"next": "/"}).encode(),

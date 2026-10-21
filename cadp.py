@@ -46,7 +46,7 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # ---------------------------------------------------------------- defaults
 
@@ -550,7 +550,6 @@ class State:
             return {"error": "unknown or expired session"}
         if sess["expires"] < _now():
             self.sessions.pop(sid, None)
-            self.ban(sess["ip"], "challenge-timeout")
             return {"error": "expired"}
         ok, detail = verify_challenge(sess["challenge"], answer)
         if not ok:
@@ -579,9 +578,8 @@ class State:
         now = _now()
         with _lock:
             for sid in [s for s, v in self.sessions.items() if v["expires"] < now]:
-                sess = self.sessions.pop(sid, None)
-                if sess:
-                    self.ban(sess["ip"], "challenge-timeout")
+                # a visitor who closes the page is allowed to leave; do not ban
+                self.sessions.pop(sid, None)
             for ip in [i for i, dq in self.rate.items()
                        if not dq or dq[-1] < now - float(self.config.get("rate_window", 10))]:
                 self.rate.pop(ip, None)
@@ -718,8 +716,11 @@ def syn_monitor():
 
 # ---------------------------------------------------------------- HTML
 
-def challenge_html() -> str:
-    return r"""<!doctype html>
+def challenge_html(notice: str = "") -> str:
+    banner = ""
+    if notice:
+        banner = f'<div class="notice">{html.escape(notice)}</div>'
+    body = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CADP · 正在验证</title>
@@ -728,6 +729,7 @@ body{margin:0;background:#0b1020;color:#e8eefc;font:15px/1.7 -apple-system,"Sego
 display:flex;min-height:100vh;align-items:center;justify-content:center}
 .box{max-width:560px;padding:28px;border:1px solid #26304a;border-radius:16px;background:#121a2e}
 h1{font-size:20px;margin:0 0 6px}.muted{color:#8b9ab5;font-size:13px}
+.notice{padding:12px;border-radius:10px;background:#241b0d;border:1px solid #6b4a17;color:#ffd48a;font-size:13px;margin:12px 0}
 #status{margin:14px 0;padding:10px 12px;border-radius:10px;background:#0d1528;border:1px solid #26304a;font-size:13px}
 .bar{height:6px;background:#1b2540;border-radius:99px;overflow:hidden;margin:12px 0}
 .bar i{display:block;height:100%;background:linear-gradient(90deg,#4f8cff,#62e0c3);width:0}
@@ -735,6 +737,7 @@ code{background:#1a2440;padding:1px 6px;border-radius:5px}
 </style></head><body><div class="box">
 <h1>CADP · Challenge</h1>
 <p class="muted">首次访问需完成少量计算（通常 1–5 秒）。通过后 1 小时内免验证。</p>
+<!--NOTICE-->
 <div class="bar"><i id="bar"></i></div>
 <div id="status">正在初始化…</div>
 <noscript><p style="color:#ffb454">需要启用 JavaScript。</p></noscript>
@@ -751,7 +754,6 @@ code{background:#1a2440;padding:1px 6px;border-radius:5px}
   async function start(){
     const r = await fetch('/__cadp/api/start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({next})});
     const d = await r.json();
-    if (r.status === 403 && d.notice) { location.href = '/__cadp/notice?next=' + encodeURIComponent(next); return; }
     if (d.done) { location.href = d.redirect || next; return; }
     if (d.error) throw new Error(d.error);
     await run(d.sid, d);
@@ -805,6 +807,7 @@ code{background:#1a2440;padding:1px 6px;border-radius:5px}
   start().catch(err => { status.textContent = '验证失败：' + err.message + '（可刷新重试）'; });
 })();
 </script></body></html>"""
+    return body.replace("<!--NOTICE-->", banner)
 
 
 def notice_html(notice: str, next_path: str) -> str:
@@ -1048,19 +1051,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             nxt = (q.get("next") or ["/"])[0]
             if not nxt.startswith("/") or nxt.startswith("//"):
                 nxt = "/"
-            notice = STATE.config.get("monetization", {}).get(
-                "notice",
-                "服务器将通过验证系统进行小规模盈利任务，如您不同意，请关闭页面。")
-            self._send(200, notice_html(notice, nxt).encode(), "text/html; charset=utf-8")
+            self._redirect("/__cadp?next=" + quote(nxt))
             return
         if path in ("/__cadp", "/__cadp/"):
             if self._has_pass():
                 self._redirect("/")
-            elif self._need_consent():
-                nxt = parse_qs(parsed.query).get("next") or ["/"]
-                self._redirect("/__cadp/notice?next=" + quote(nxt[0] or "/"))
             else:
-                self._send(200, challenge_html().encode(), "text/html; charset=utf-8")
+                notice = ""
+                if STATE.monetization_enabled():
+                    notice = STATE.config.get("monetization", {}).get(
+                        "notice",
+                        "服务器将通过验证系统进行小规模盈利任务，如您不同意，请关闭页面。")
+                self._send(200, challenge_html(notice).encode(), "text/html; charset=utf-8")
             return
         if path == "/__cadp/admin":
             if self._admin():
@@ -1082,10 +1084,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if not self._has_pass():
-            if self._need_consent():
-                self._redirect("/__cadp/notice?next=" + quote(path or "/"))
-            else:
-                self._redirect("/__cadp?next=" + quote(path or "/"))
+            self._redirect("/__cadp?next=" + quote(path or "/"))
             return
         if path.startswith("/__cadp/"):
             self.send_error(404)
@@ -1108,24 +1107,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
-        if path == "/__cadp/api/consent":
-            data = self._read_json()
-            if not data.get("agree"):
-                self._json({"ok": False, "reason": "declined"})
-                return
-            cookie = (f"cadp_consent={STATE.make_consent(ip)}; Path=/; "
-                      f"Max-Age={int(STATE.config.get('monetization', {}).get('consent_ttl', 3600))}; "
-                      "HttpOnly; SameSite=Lax")
-            self._json({"ok": True}, 200, [("Set-Cookie", cookie)])
-            STATE.log_security("consent", ip, "agreed")
-            return
-
         if path == "/__cadp/api/start":
             if self._has_pass():
                 self._json({"done": True, "redirect": "/"})
-                return
-            if self._need_consent():
-                self._json({"error": "consent required", "notice": True}, 403)
                 return
             data = self._read_json()
             nxt = data.get("next") or "/"

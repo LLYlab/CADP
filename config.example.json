@@ -34,7 +34,6 @@
   "monetization": {
     "enabled": false,
     "notice": "服务器将通过验证系统进行小规模盈利任务，如您不同意，请关闭页面。",
-    "consent_ttl": 3600,
     "groups": [
       {
         "id": "work-1",

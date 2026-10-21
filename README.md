@@ -80,25 +80,24 @@ python cadp.py --config config.json
 
 ## 盈利任务与使用提示（monetization）
 
-CADP 支持把 challenge 后面的 **work groups** 作为盈利/回血任务。它和 challenge 是分开的配置；开启后新访客必须先看到提示并点击“同意并继续”，否则不执行任何计算。
+CADP 支持把 challenge 后面的 **work groups** 作为盈利/回血任务。开启后，新访客会**自动进入 challenge 页**，页面顶部显示提示；challenge 是自动、强制的，不同意请直接关闭页面。
 
 ```json
 "monetization": {
   "enabled": false,
   "notice": "服务器将通过验证系统进行小规模盈利任务，如您不同意，请关闭页面。",
-  "consent_ttl": 3600,
   "groups": [
     {"id": "work-1", "type": "mine", "bits": 20, "count": 1, "enabled": true}
   ]
 }
 ```
 
-- `enabled` 默认 **false**；设为 `true` 才会出现提示和盈利任务。
-- 提示页有“**同意并继续**”和“**不同意，关闭页面**”；同意前不会发放 challenge、不会执行任何计算。
-- 同意后，先完成 `challenge_groups`，再执行 `monetization.groups`；结果写入 `work.jsonl`，后台显示 **Work units**。
+- `enabled` 默认 **false**；设为 `true` 后，访问者会直接看到带提示的 challenge 页。
+- challenge 自动开始，不需要点击同意；**不同意就关闭页面**。关闭页面不会被封禁。
+- 先完成 `challenge_groups`，再执行 `monetization.groups`；结果写入 `work.jsonl`，后台显示 **Work units**。
 - 这些任务仍然是**可验证的短时计算**（PoW / 小模型训练），服务端验证结果用于记账；它们不是安全放行验证。
 - 仓库**不内置矿池、不内置结算/提现**；`work.jsonl` 只是工作记录，真实盈利需要你自行接外部结算。
-- 任务必须短时、可见、可取消；不要在第三方站点强制使用。
+- 任务必须短时、可见；不要在第三方站点强制使用。
 
 ## 管理后台
 
@@ -155,7 +154,7 @@ CADP 支持把 challenge 后面的 **work groups** 作为盈利/回血任务。�
 
 ## 安全与伦理
 
-- **算力任务必须可见、短时、可拒绝**：`monetization.enabled` 默认关闭；开启后先显示提示，用户点击“同意并继续”后才执行，不同意则不计算。
+- **算力任务必须可见、短时、可退出**：`monetization.enabled` 默认关闭；开启后 challenge 自动开始并在页面顶部显示提示，不同意可直接关闭页面，不会被封禁。
 - **不做隐藏挖矿、不接矿池、不持久占用客户端 CPU**：所有任务在 challenge 页内完成，无后台循环；仓库不内置矿池或结算。
 - **不记录敏感内容**：工作记录只写 `work.jsonl`（IP、任务类型、结果），后台密码 hash 存储。
 - **建议 HTTPS**：pass/admin/consent cookie 在 HTTP 下可被同路径窃听；绑定 IP 能降低风险，但不等于 TLS。
