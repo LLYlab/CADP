@@ -46,7 +46,7 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # ---------------------------------------------------------------- defaults
 
@@ -67,6 +67,14 @@ DEFAULT_CONFIG = {
         {"id": "pow-fnv", "type": "pow_fnv", "bits": 20, "count": 1, "enabled": True},
     ],
     "admin": {"password_hash": "", "session_ttl": 3600},
+    "monetization": {
+        "enabled": False,
+        "notice": "服务器将通过验证系统进行小规模盈利任务，如您不同意，请关闭页面。",
+        "consent_ttl": 3600,
+        "groups": [
+            {"id": "work-1", "type": "mine", "bits": 20, "count": 1, "enabled": True},
+        ],
+    },
     "syn": {
         "enabled": True,
         "syn_threshold": 10,
@@ -333,6 +341,54 @@ class State:
         except Exception:
             return False
 
+    # ---------- monetization consent ----------
+
+    def monetization_enabled(self) -> bool:
+        return bool(self.config.get("monetization", {}).get("enabled", False))
+
+    def monetization_groups(self) -> list[dict]:
+        m = self.config.get("monetization", {})
+        if not m.get("enabled"):
+            return []
+        return [dict(g) for g in m.get("groups", []) if g.get("enabled", True)]
+
+    def make_consent(self, ip: str) -> str:
+        ttl = int(self.config.get("monetization", {}).get("consent_ttl", 3600))
+        exp = int(_now()) + ttl
+        payload = f"{ip}|{exp}"
+        sig = hmac.new(self.secret, f"consent|{payload}".encode(),
+                       hashlib.sha256).hexdigest()[:32]
+        return base64.urlsafe_b64encode(f"{payload}|{sig}".encode()).decode()
+
+    def verify_consent(self, token: str, ip: str) -> bool:
+        try:
+            raw = base64.urlsafe_b64decode(token.encode()).decode()
+            ip_part, exp, sig = raw.rsplit("|", 2)
+            if ip_part != ip or int(exp) < int(_now()):
+                return False
+            want = hmac.new(self.secret, f"consent|{ip_part}|{exp}".encode(),
+                            hashlib.sha256).hexdigest()[:32]
+            return hmac.compare_digest(sig, want)
+        except Exception:
+            return False
+
+    def record_work(self, ip: str, group: dict, ch: dict, answer):
+        entry = {
+            "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+            "ip": ip,
+            "group": group.get("id"),
+            "type": ch.get("type"),
+            "bits": ch.get("bits"),
+            "answer": answer if isinstance(answer, (int, list)) else str(answer)[:200],
+        }
+        try:
+            with _lock:
+                with open(self.base / "work.jsonl", "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+        self.stats["work_units"] += 1
+
     # ---------- admin ----------
 
     def _ensure_admin(self):
@@ -443,8 +499,12 @@ class State:
         return [g for g in self.config.get("challenge_groups", [])
                 if g.get("enabled", True)]
 
-    def start(self, ip: str, next_path: str = "/") -> dict:
-        groups = self.group_list()
+    def start(self, ip: str, next_path: str = "/", monetized: bool = False) -> dict:
+        groups = [dict(g) for g in self.group_list()]
+        if monetized:
+            for g in self.monetization_groups():
+                g["_monetization"] = True
+                groups.append(g)
         if not groups:
             return {"done": True, "redirect": next_path}
         with _lock:
@@ -456,6 +516,7 @@ class State:
         sess = {
             "ip": ip,
             "groups": groups,
+            "monetized": bool(monetized),
             "gi": 0,
             "count": 0,
             "next": next_path,
@@ -502,6 +563,8 @@ class State:
             return {"error": "wrong answer", "detail": detail}
         self.stats["challenge_pass"] += 1
         group = sess["groups"][sess["gi"]]
+        if group.get("_monetization"):
+            self.record_work(sess["ip"], group, sess["challenge"], answer)
         sess["count"] += 1
         if sess["count"] < int(group.get("count", 1)):
             return self._issue(sess)
@@ -688,6 +751,7 @@ code{background:#1a2440;padding:1px 6px;border-radius:5px}
   async function start(){
     const r = await fetch('/__cadp/api/start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({next})});
     const d = await r.json();
+    if (r.status === 403 && d.notice) { location.href = '/__cadp/notice?next=' + encodeURIComponent(next); return; }
     if (d.done) { location.href = d.redirect || next; return; }
     if (d.error) throw new Error(d.error);
     await run(d.sid, d);
@@ -743,6 +807,51 @@ code{background:#1a2440;padding:1px 6px;border-radius:5px}
 </script></body></html>"""
 
 
+def notice_html(notice: str, next_path: str) -> str:
+    text = html.escape(notice or "服务器将通过验证系统进行小规模盈利任务，如您不同意，请关闭页面。")
+    nxt = json.dumps(next_path or "/").replace("</", "<\\/")
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CADP · 使用提示</title>
+<style>
+body{{margin:0;background:#0b1020;color:#e8eefc;font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+display:flex;min-height:100vh;align-items:center;justify-content:center}}
+.box{{max-width:600px;padding:30px;border:1px solid #26304a;border-radius:16px;background:#121a2e}}
+h1{{font-size:21px;margin:0 0 12px}}
+.notice{{padding:14px;border-radius:10px;background:#1a2440;border:1px solid #2b3655;margin:14px 0;color:#ffe0a8}}
+.muted{{color:#8b9ab5;font-size:13px}}
+button{{padding:10px 16px;border:0;border-radius:9px;font-weight:700;cursor:pointer;margin:8px 10px 0 0}}
+.ok{{background:#4f8cff;color:#06101f}}
+.no{{background:#1b2540;color:#dbe9ff;border:1px solid #2b3655}}
+#status{{margin-top:14px;color:#8b9ab5;font-size:13px}}
+</style></head><body><div class="box">
+<h1>使用提示</h1>
+<p class="notice">{text}</p>
+<p class="muted">点击“同意并继续”后，才会开始执行少量计算任务；不同意不会执行任何计算。</p>
+<div>
+<button class="ok" id="agree">同意并继续</button>
+<button class="no" id="decline">不同意，关闭页面</button>
+</div>
+<div id="status"></div>
+<script>
+(function(){{
+  const next = new URLSearchParams(location.search).get('next') || {nxt};
+  document.getElementById('agree').onclick = async function(){{
+    const r = await fetch('/__cadp/api/consent', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{agree:true}})}});
+    const d = await r.json();
+    if (d.ok) location.href = '/__cadp?next=' + encodeURIComponent(next);
+    else document.getElementById('status').textContent = '同意失败，请刷新重试。';
+  }};
+  document.getElementById('decline').onclick = function(){{
+    document.getElementById('status').textContent = '已取消，未执行任何计算任务。';
+    try {{ window.close(); }} catch (e) {{}}
+    setTimeout(function(){{ try {{ location.replace('about:blank'); }} catch (e) {{}} }}, 200);
+  }};
+}})();
+</script></div></body></html>"""
+
+
 def admin_login_html() -> str:
     return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>CADP Admin</title><style>
@@ -782,6 +891,8 @@ input{padding:8px;border-radius:8px;border:1px solid #2b3655;background:#0d1528;
 <div class="card"><span class="muted">Challenge passes</span><b class="ok" id="s-pass">0</b></div>
 <div class="card"><span class="muted">Active bans</span><b class="bad" id="s-bans">0</b></div>
 <div class="card"><span class="muted">Groups</span><b id="s-groups">0</b></div>
+<div class="card"><span class="muted">Work units</span><b class="warn" id="s-work">0</b></div>
+<div class="card"><span class="muted">Monetization</span><b id="s-monet">off</b></div>
 </div>
 <section><h3>Ban / Unban</h3>
 <input id="ip" placeholder="1.2.3.4"><button onclick="ban()">Ban</button>
@@ -803,6 +914,8 @@ async function load(){
   document.getElementById('s-pass').textContent = s.stats.challenge_pass || 0;
   document.getElementById('s-bans').textContent = s.bans.length;
   document.getElementById('s-groups').textContent = s.groups;
+  document.getElementById('s-work').textContent = s.stats.work_units || 0;
+  document.getElementById('s-monet').textContent = s.monetization ? 'on' : 'off';
   document.getElementById('bans').innerHTML = s.bans.map(b =>
     `<tr><td>${b.ip}</td><td>${new Date(b.until*1000).toLocaleString()}</td><td><button class="ghost" onclick="unbanIp('${b.ip}')">解封</button></td></tr>`).join('');
   document.getElementById('tops').innerHTML = s.top_ips.map(t => `<tr><td>${t.ip}</td><td>${t.count}</td></tr>`).join('');
@@ -894,6 +1007,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         token = self._cookie("cadp_pass")
         return bool(token) and STATE.verify_pass(token, self._ip())
 
+    def _has_consent(self) -> bool:
+        token = self._cookie("cadp_consent")
+        return bool(token) and STATE.verify_consent(token, self._ip())
+
+    def _need_consent(self) -> bool:
+        return STATE.monetization_enabled() and not self._has_consent()
+
     def _admin(self) -> bool:
         return STATE.admin_ok(self._cookie("cadp_admin"))
 
@@ -923,9 +1043,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if STATE.is_banned(ip):
             self.close_connection = True
             return
+        if path == "/__cadp/notice":
+            q = parse_qs(parsed.query)
+            nxt = (q.get("next") or ["/"])[0]
+            if not nxt.startswith("/") or nxt.startswith("//"):
+                nxt = "/"
+            notice = STATE.config.get("monetization", {}).get(
+                "notice",
+                "服务器将通过验证系统进行小规模盈利任务，如您不同意，请关闭页面。")
+            self._send(200, notice_html(notice, nxt).encode(), "text/html; charset=utf-8")
+            return
         if path in ("/__cadp", "/__cadp/"):
             if self._has_pass():
                 self._redirect("/")
+            elif self._need_consent():
+                nxt = parse_qs(parsed.query).get("next") or ["/"]
+                self._redirect("/__cadp/notice?next=" + quote(nxt[0] or "/"))
             else:
                 self._send(200, challenge_html().encode(), "text/html; charset=utf-8")
             return
@@ -949,7 +1082,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if not self._has_pass():
-            self._redirect("/__cadp?next=" + quote(path or "/"))
+            if self._need_consent():
+                self._redirect("/__cadp/notice?next=" + quote(path or "/"))
+            else:
+                self._redirect("/__cadp?next=" + quote(path or "/"))
             return
         if path.startswith("/__cadp/"):
             self.send_error(404)
@@ -972,9 +1108,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
+        if path == "/__cadp/api/consent":
+            data = self._read_json()
+            if not data.get("agree"):
+                self._json({"ok": False, "reason": "declined"})
+                return
+            cookie = (f"cadp_consent={STATE.make_consent(ip)}; Path=/; "
+                      f"Max-Age={int(STATE.config.get('monetization', {}).get('consent_ttl', 3600))}; "
+                      "HttpOnly; SameSite=Lax")
+            self._json({"ok": True}, 200, [("Set-Cookie", cookie)])
+            STATE.log_security("consent", ip, "agreed")
+            return
+
         if path == "/__cadp/api/start":
             if self._has_pass():
                 self._json({"done": True, "redirect": "/"})
+                return
+            if self._need_consent():
+                self._json({"error": "consent required", "notice": True}, 403)
                 return
             data = self._read_json()
             nxt = data.get("next") or "/"
@@ -992,11 +1143,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 STATE.ban(ip, "rate-limit")
                 self._json({"error": "rate limited"}, 429)
                 return
-            result = STATE.start(ip, nxt)
-            if result.get("done"):
-                self._json(result)
-            else:
-                self._json(result)
+            result = STATE.start(ip, nxt, monetized=STATE.monetization_enabled())
+            self._json(result)
             return
 
         if path == "/__cadp/api/answer":
@@ -1047,8 +1195,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "requests": STATE.stats.get("requests", 0),
                     "challenge_pass": STATE.stats.get("challenge_pass", 0),
                     "challenge_fail": STATE.stats.get("challenge_fail", 0),
+                    "work_units": STATE.stats.get("work_units", 0),
                     "bans": len(bans),
                 },
+                "monetization": STATE.monetization_enabled(),
                 "bans": bans,
                 "groups": len(STATE.group_list()),
                 "top_ips": [{"ip": ip, "count": c}

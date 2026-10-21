@@ -10,6 +10,7 @@ cadp_secret
 ADMIN_PASSWORD.txt
 access.log
 security.log
+work.jsonl
 *.log
 .venv/
 .idea/

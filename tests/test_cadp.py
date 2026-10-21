@@ -159,5 +159,61 @@ class CadpTests(unittest.TestCase):
                 pass
 
 
+    def test_consent_and_monetized_work(self):
+        cfg_path = _path("monetize").with_suffix(".json")
+        cfg = {
+            "root": ".",
+            "pool_size": 10,
+            "challenge_groups": [
+                {"id": "pow", "type": "pow_fnv", "bits": 8, "count": 1},
+            ],
+            "monetization": {
+                "enabled": True,
+                "consent_ttl": 60,
+                "groups": [
+                    {"id": "work", "type": "mine", "bits": 8, "count": 1},
+                ],
+            },
+            "admin": {"password_hash": cadp._hash_password("pw")},
+        }
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        try:
+            st = cadp.State(cfg_path)
+            token = st.make_consent("1.2.3.4")
+            self.assertTrue(st.verify_consent(token, "1.2.3.4"))
+            self.assertFalse(st.verify_consent(token, "5.6.7.8"))
+
+            res = st.start("1.2.3.4", "/", monetized=True)
+            sid = res["sid"]
+            for _ in range(6):
+                ch = res["challenge"]
+                ans = solve_pow(ch) if ch["type"] in ("pow_fnv", "mine", "pow_hard") else ch["answer"]
+                res = st.answer(sid, ans)
+                if res.get("done"):
+                    break
+            self.assertTrue(res.get("done"), res)
+            self.assertEqual(st.stats.get("work_units"), 1)
+            work = Path(cfg_path).parent / "work.jsonl"
+            self.assertTrue(work.exists())
+            self.assertIn('"group": "work"', work.read_text(encoding="utf-8"))
+        finally:
+            for p in TESTS_DIR.glob("_cadp_monetize_*"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            for p in (TESTS_DIR / "work.jsonl",
+                      TESTS_DIR / "challenge_pool.json",
+                      TESTS_DIR / "challenge_pool_state.json",
+                      TESTS_DIR / "bans.json",
+                      TESTS_DIR / "cadp_secret",
+                      TESTS_DIR / "access.log",
+                      TESTS_DIR / "security.log"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

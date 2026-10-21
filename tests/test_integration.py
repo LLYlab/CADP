@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -116,6 +117,93 @@ class ServerTest(unittest.TestCase):
                                      headers={"Content-Type": "application/json"})
         admin.open(req, timeout=10).read()
         self.assertFalse(cadp.STATE.is_banned("8.8.8.8"))
+
+
+class MonetizationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.td = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent)
+        base = Path(cls.td.name)
+        (base / "site").mkdir()
+        (base / "site" / "index.html").write_text("CADP monetized site", encoding="utf-8")
+        cfg = {
+            "listen_host": "127.0.0.1",
+            "listen_port": 18082,
+            "root": "site",
+            "pool_size": 30,
+            "challenge_groups": [
+                {"id": "pow", "type": "pow_fnv", "bits": 8, "count": 1},
+            ],
+            "monetization": {
+                "enabled": True,
+                "consent_ttl": 60,
+                "groups": [
+                    {"id": "work", "type": "mine", "bits": 8, "count": 1},
+                ],
+            },
+            "admin": {"password_hash": cadp._hash_password("testpw")},
+        }
+        cls.cfg_path = base / "config.json"
+        cls.cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        cadp.STATE = cadp.State(cls.cfg_path)
+        cls.httpd = cadp.Server(("127.0.0.1", 18082), cadp.Handler)
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        time.sleep(0.2)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.td.cleanup()
+
+    def test_notice_consent_and_work(self):
+        base = "http://127.0.0.1:18082"
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+        page = opener.open(base + "/", timeout=10).read().decode()
+        self.assertIn("同意并继续", page)
+        self.assertIn("如您不同意，请关闭页面", page)
+
+        req = urllib.request.Request(base + "/__cadp/api/start",
+                                     data=json.dumps({"next": "/"}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            opener.open(req, timeout=10)
+        self.assertEqual(ctx.exception.code, 403)
+
+        req = urllib.request.Request(base + "/__cadp/api/consent",
+                                     data=json.dumps({"agree": True}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        self.assertTrue(json.loads(opener.open(req, timeout=10).read())["ok"])
+
+        req = urllib.request.Request(base + "/__cadp/api/start",
+                                     data=json.dumps({"next": "/"}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        d = json.loads(opener.open(req, timeout=10).read())
+        sid = d["sid"]
+        for _ in range(6):
+            ch = d["challenge"]
+            if ch["type"] in ("pow_fnv", "mine", "pow_hard"):
+                ans = solve_pow(ch)
+            elif ch["type"] == "arith":
+                ans = ch["answer"]
+            else:
+                self.fail(ch["type"])
+            req = urllib.request.Request(base + "/__cadp/api/answer",
+                                         data=json.dumps({"sid": sid, "answer": ans}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            d = json.loads(opener.open(req, timeout=10).read())
+            if d.get("done"):
+                break
+        self.assertTrue(d.get("done"), d)
+
+        body = opener.open(base + "/", timeout=10).read().decode()
+        self.assertIn("CADP monetized site", body)
+        work = Path(self.td.name) / "work.jsonl"
+        self.assertTrue(work.exists())
+        self.assertIn('"group": "work"', work.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
