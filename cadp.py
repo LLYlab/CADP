@@ -1127,7 +1127,17 @@ def _cleanup_thread():
 
 def init_config(path: Path, port: int, root: str):
     path.parent.mkdir(parents=True, exist_ok=True)
-    cfg = _load_config(path)
+    if path.exists():
+        cfg = _load_config(path)
+    else:
+        example = path.parent / "config.example.json"
+        data = {}
+        if example.exists():
+            try:
+                data = json.loads(example.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        cfg = _merge(DEFAULT_CONFIG, data)
     cfg["listen_port"] = port
     cfg["root"] = root
     admin = cfg.setdefault("admin", {})
