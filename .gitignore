@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+config.json
+bans.json
+bans.json.tmp
+challenge_pool.json
+challenge_pool_state.json
+cadp_secret
+ADMIN_PASSWORD.txt
+access.log
+security.log
+*.log
+.venv/
+.idea/
+.vscode/

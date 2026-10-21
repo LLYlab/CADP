@@ -1,0 +1,40 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 8080,
+  "root": "site",
+  "pass_ttl": 3600,
+  "pending_ttl": 30,
+  "pending_max": 10,
+  "rate_window": 10,
+  "rate_max": 30,
+  "fail_max": 5,
+  "fail_window": 60,
+  "ban_ttl": 3600,
+  "pool_size": 20000,
+  "challenge_groups": [
+    {
+      "id": "pow-1",
+      "type": "pow_fnv",
+      "bits": 20,
+      "count": 1,
+      "enabled": true
+    },
+    {
+      "id": "pow-2",
+      "type": "pow_fnv",
+      "bits": 22,
+      "count": 2,
+      "enabled": true
+    }
+  ],
+  "admin": {
+    "password_hash": "",
+    "session_ttl": 3600
+  },
+  "syn": {
+    "enabled": true,
+    "syn_threshold": 10,
+    "est_threshold": 24,
+    "block_firewall": true
+  }
+}
